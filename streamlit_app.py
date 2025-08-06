@@ -6,100 +6,98 @@ import fitz  # PyMuPDF
 import time
 import os
 import re
+import pandas as pd
+import asyncio
+import subprocess
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
+# Install Chromium browser for Playwright (first-time only)
+subprocess.run(["playwright", "install", "chromium"])
+
+from playwright.async_api import async_playwright
 
 
-# ----------------------- PAGE SETUP -----------------------
-st.set_page_config(page_title="Prórroga Detector", layout="centered")
+st.set_page_config(page_title="Prórroga Paragraph Extractor", layout="centered")
 st.title("📄 Contract Prórroga Paragraph Extractor")
-st.markdown("Paste a **contract detail page** from [contrataciondelestado.es](https://contrataciondelestado.es) to extract PDF links and detect paragraphs related to **prórrogas (extensions)** in those documents.")
+st.markdown("""
+Paste a [contrataciondelestado.es](https://contrataciondelestado.es) **contract page URL**, and this app will:
+- Load dynamic content
+- Extract any PDF links
+- Check for paragraphs mentioning prórrogas
+""")
 
-# ----------------------- INPUT -----------------------
-url = st.text_input("🔗 Contract page URL:", placeholder="https://contrataciondelestado.es/wps/poc?...")
+url = st.text_input("🔗 Paste the contract detail page URL:")
 
-# ----------------------- EXTRACT PDF LINKS (DYNAMIC) -----------------------
-def extract_pdf_links_dynamic(page_url):
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 
-    pdf_links = []
-    try:
-        driver.get(page_url)
-        time.sleep(4)  # Wait for JS
+# --------------- Extract PDF Links with Playwright ----------------
+async def extract_pdf_links_with_playwright(url):
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context()
+        page = await context.new_page()
+        await page.goto(url)
+        await page.wait_for_timeout(4000)
 
-        elements = driver.find_elements("tag name", "a")
-        for elem in elements:
-            href = elem.get_attribute("href")
+        anchors = await page.query_selector_all("a")
+        links = []
+        for a in anchors:
+            href = await a.get_attribute("href")
             if href and href.lower().endswith(".pdf"):
-                pdf_links.append(href)
+                if href.startswith("http"):
+                    links.append(href)
+                else:
+                    full_url = page.url.split('?')[0] + href
+                    links.append(full_url)
+        await browser.close()
+        return list(set(links))
 
-    except Exception as e:
-        st.error(f"❌ Error extracting PDF links: {e}")
-    finally:
-        driver.quit()
 
-    return list(set(pdf_links))
-
-# ----------------------- EXTRACT TEXT FROM PDF -----------------------
+# --------------- Extract PDF Text ----------------
 def extract_text_from_pdf(pdf_url):
     try:
         response = requests.get(pdf_url, timeout=10)
-        temp_path = "temp_downloaded.pdf"
-        with open(temp_path, "wb") as f:
+        path = "temp.pdf"
+        with open(path, "wb") as f:
             f.write(response.content)
 
         text = ""
-        with fitz.open(temp_path) as doc:
+        with fitz.open(path) as doc:
             for page in doc:
                 text += page.get_text("text")
-
-        os.remove(temp_path)
+        os.remove(path)
         return text
-
     except Exception as e:
-        return f"[ERROR extracting PDF: {e}]"
+        return f"[ERROR reading PDF: {e}]"
 
-# ----------------------- FIND PARAGRAPHS -----------------------
+
+# --------------- Find Prórroga Paragraphs ----------------
 def find_prorroga_paragraphs(text):
-    # Split by paragraph or sentence endings
-    paragraphs = re.split(r'\n{2,}|(?<=\.)\s+(?=[A-ZÁÉÍÓÚÜÑ])', text)
-    trigger_words = [
-        "prórroga", "prorrogable", "puede prorrogar", "prorrogará", "prorrogado"
-    ]
-    matches = []
+    # Split into paragraphs and sentences
+    blocks = re.split(r'\n{2,}|(?<=\.)\s+(?=[A-ZÁÉÍÓÚÜÑ])', text)
+    trigger_words = ["prórroga", "prorrogable", "puede prorrogar", "prorrogará", "prorrogado"]
 
-    for p in paragraphs:
-        if any(trigger in p.lower() for trigger in trigger_words):
-            matches.append(p.strip())
-
+    matches = [block.strip() for block in blocks if any(t in block.lower() for t in trigger_words)]
     return matches
 
-# ----------------------- MAIN LOGIC -----------------------
+
+# --------------- Main Logic ----------------
 if url:
-    st.info("🔍 Loading and extracting PDF links from the page...")
-    pdf_links = extract_pdf_links_dynamic(url)
+    st.info("🔍 Extracting PDF links from dynamic page...")
+    pdf_links = asyncio.run(extract_pdf_links_with_playwright(url))
 
     if not pdf_links:
-        st.warning("⚠️ No PDF links found. Check if the page is correct.")
+        st.warning("⚠️ No PDFs found.")
     else:
-        st.success(f"✅ Found {len(pdf_links)} PDF(s). Scanning for prórroga mentions...")
+        st.success(f"✅ Found {len(pdf_links)} PDF(s). Scanning...")
 
         for pdf_url in pdf_links:
             st.markdown(f"---\n### 📎 PDF: [{pdf_url}]({pdf_url})")
 
             text = extract_text_from_pdf(pdf_url)
-            paragraphs = find_prorroga_paragraphs(text)
+            matches = find_prorroga_paragraphs(text)
 
-            if not paragraphs:
+            if not matches:
                 st.write("❌ No prórroga-related paragraphs found.")
             else:
-                st.success(f"✅ Found {len(paragraphs)} relevant paragraph(s):")
-                for i, para in enumerate(paragraphs, 1):
+                st.success(f"✅ Found {len(matches)} paragraph(s) mentioning prórrogas:")
+                for i, para in enumerate(matches, 1):
                     st.markdown(f"**Paragraph {i}:**\n> {para}")
