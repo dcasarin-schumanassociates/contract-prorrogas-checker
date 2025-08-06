@@ -2,70 +2,104 @@
 
 import streamlit as st
 import requests
-from bs4 import BeautifulSoup
 import fitz  # PyMuPDF
+import time
+import os
 import re
-import pandas as pd
-from urllib.parse import urljoin
 
-st.set_page_config(page_title="Contract Prórroga Checker")
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 
-st.title("📄 Contract Extension (Prórroga) Checker")
 
-# Step 1: User pastes a URL
-url = st.text_input("Paste the contract page URL here:")
+# ----------------------- PAGE SETUP -----------------------
+st.set_page_config(page_title="Prórroga Detector", layout="centered")
+st.title("📄 Contract Prórroga Paragraph Extractor")
+st.markdown("Paste a **contract detail page** from [contrataciondelestado.es](https://contrataciondelestado.es) to extract PDF links and detect paragraphs related to **prórrogas (extensions)** in those documents.")
 
-def extract_pdf_links(base_url):
+# ----------------------- INPUT -----------------------
+url = st.text_input("🔗 Contract page URL:", placeholder="https://contrataciondelestado.es/wps/poc?...")
+
+# ----------------------- EXTRACT PDF LINKS (DYNAMIC) -----------------------
+def extract_pdf_links_dynamic(page_url):
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+
+    pdf_links = []
     try:
-        response = requests.get(base_url)
-        soup = BeautifulSoup(response.content, 'html.parser')
-        links = [a['href'] for a in soup.find_all('a', href=True)]
-        pdf_links = [urljoin(base_url, link) for link in links if link.endswith('.pdf')]
-        return pdf_links
-    except Exception as e:
-        st.error(f"Error extracting links: {e}")
-        return []
+        driver.get(page_url)
+        time.sleep(4)  # Wait for JS
 
+        elements = driver.find_elements("tag name", "a")
+        for elem in elements:
+            href = elem.get_attribute("href")
+            if href and href.lower().endswith(".pdf"):
+                pdf_links.append(href)
+
+    except Exception as e:
+        st.error(f"❌ Error extracting PDF links: {e}")
+    finally:
+        driver.quit()
+
+    return list(set(pdf_links))
+
+# ----------------------- EXTRACT TEXT FROM PDF -----------------------
 def extract_text_from_pdf(pdf_url):
     try:
-        response = requests.get(pdf_url)
-        with open("temp.pdf", "wb") as f:
+        response = requests.get(pdf_url, timeout=10)
+        temp_path = "temp_downloaded.pdf"
+        with open(temp_path, "wb") as f:
             f.write(response.content)
+
         text = ""
-        with fitz.open("temp.pdf") as doc:
+        with fitz.open(temp_path) as doc:
             for page in doc:
-                text += page.get_text()
+                text += page.get_text("text")
+
+        os.remove(temp_path)
         return text
+
     except Exception as e:
-        return f"[ERROR] Failed to read {pdf_url}: {e}"
+        return f"[ERROR extracting PDF: {e}]"
 
-def find_prorroga_info(text):
-    # Looks for lines with "prórroga" and associated dates
-    matches = re.findall(r"(pr[oó]rroga.*?(\d{2}/\d{2}/\d{4}))", text, re.IGNORECASE)
-    return [m[0] for m in matches]
+# ----------------------- FIND PARAGRAPHS -----------------------
+def find_prorroga_paragraphs(text):
+    # Split by paragraph or sentence endings
+    paragraphs = re.split(r'\n{2,}|(?<=\.)\s+(?=[A-ZÁÉÍÓÚÜÑ])', text)
+    trigger_words = [
+        "prórroga", "prorrogable", "puede prorrogar", "prorrogará", "prorrogado"
+    ]
+    matches = []
 
-# Main logic
+    for p in paragraphs:
+        if any(trigger in p.lower() for trigger in trigger_words):
+            matches.append(p.strip())
+
+    return matches
+
+# ----------------------- MAIN LOGIC -----------------------
 if url:
-    st.info("🔍 Scanning website for PDF links...")
-    pdf_links = extract_pdf_links(url)
+    st.info("🔍 Loading and extracting PDF links from the page...")
+    pdf_links = extract_pdf_links_dynamic(url)
 
     if not pdf_links:
-        st.warning("No PDFs found at this URL.")
+        st.warning("⚠️ No PDF links found. Check if the page is correct.")
     else:
-        data = []
+        st.success(f"✅ Found {len(pdf_links)} PDF(s). Scanning for prórroga mentions...")
+
         for pdf_url in pdf_links:
-            st.write(f"📎 Checking PDF: {pdf_url}")
+            st.markdown(f"---\n### 📎 PDF: [{pdf_url}]({pdf_url})")
+
             text = extract_text_from_pdf(pdf_url)
-            prorrogas = find_prorroga_info(text)
-            data.append({
-                "PDF URL": pdf_url,
-                "Prórroga Info Found": "; ".join(prorrogas) if prorrogas else "❌ Not found"
-            })
+            paragraphs = find_prorroga_paragraphs(text)
 
-        df = pd.DataFrame(data)
-        st.success("✅ Scan completed!")
-        st.dataframe(df)
-
-        # CSV download
-        csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button("⬇️ Download CSV", csv, "prorrogas_results.csv", "text/csv")
+            if not paragraphs:
+                st.write("❌ No prórroga-related paragraphs found.")
+            else:
+                st.success(f"✅ Found {len(paragraphs)} relevant paragraph(s):")
+                for i, para in enumerate(paragraphs, 1):
+                    st.markdown(f"**Paragraph {i}:**\n> {para}")
