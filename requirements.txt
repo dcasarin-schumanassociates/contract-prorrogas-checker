@@ -1,6 +1,7 @@
-streamlit
-requests
-beautifulsoup4
-PyMuPDF
-pandas
-selenium
+streamlit>=1.35.0
+selenium>=4.21.0
+webdriver-manager>=4.0.1
+beautifulsoup4>=4.12.3
+pandas>=2.2.2
+PyMuPDF>=1.24.1
+requests>=2.32.3
